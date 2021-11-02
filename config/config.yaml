@@ -1,0 +1,24 @@
+resourcesfolder:
+  ../resources/
+resultsfolder:
+  ../results/
+fastqfiles:
+  - 211022_SN7280_A_L001_AMDG-10 # replace by your own file name prefix
+  - 211022_SN7280_A_L001_AMDG-11 # replace by your own file name prefix
+mergedfile:
+  211022_SN7280_A_L001_AMDG # replace by your own file name prefix
+cutadapt:
+  forwardadapter: GATCGGAAGAGCACACGTCT # replace by your own forward adapter
+  reverseadapter: GATCGGAAGAGCGTCGTGTA # replace by your own forward adapter
+  minoverlap: 8
+split_fastq:
+  nfiles: 50
+alifilt:
+  minscore: 40.00
+split_fasta:
+  nfiles: 50
+basicfilt:
+  minlength: 100
+  mincount: 1
+clustering:
+  minsim: 0.97

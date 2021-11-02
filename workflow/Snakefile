@@ -1,0 +1,257 @@
+__author__ = "Anne-Sophie Benoiston"
+__email__ = "anne-sophie.benoiston@univ-tlse3.fr"
+
+"""
+DESCRIPTION
+
+This is a snakemake workflow that analyzes DNA metabarcoding data with the OBITools1.
+
+"""
+
+configfile: "../config/config.yaml"
+
+
+rule all:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt_cl_agg.tab"
+
+# CUT ADAPTERS
+rule cutadapt:
+	input:
+		R1=config["resourcesfolder"]+"{run}_R1.fastq",
+		R2=config["resourcesfolder"]+"{run}_R2.fastq"
+	output:
+		R1=config["resultsfolder"]+"{run}/{run}_R1_cutadapt.fastq",
+		R2=config["resultsfolder"]+"{run}/{run}_R2_cutadapt.fastq"
+	params:
+		forwardadapter=config["cutadapt"]["forwardadapter"],
+		reverseadapter=config["cutadapt"]["reverseadapter"],
+		minoverlap=config["cutadapt"]["minoverlap"]
+	log:
+		"../log/cutadapt_{run}.log"
+	shell:
+		"""
+		set +u; module load bioinfo/cutadapt-3.4; set -u  
+		cutadapt -a '{params.forwardadapter};min_overlap={params.minoverlap}' -A '{params.reverseadapter};min_overlap={params.minoverlap}' -o {output.R1} -p {output.R2} {input.R1} {input.R2} 2> {log}
+		"""
+
+# SPLIT FILES
+rule split_fastq:
+	input:
+		R1=config["resultsfolder"]+"{run}/{run}_R1_cutadapt.fastq",
+		R2=config["resultsfolder"]+"{run}/{run}_R2_cutadapt.fastq"
+	output:
+		R1=dynamic(config["resultsfolder"]+"{run}/splitted_fastq/{run}_R1_cutadapt_{n}.fastq"),
+		R2=dynamic(config["resultsfolder"]+"{run}/splitted_fastq/{run}_R2_cutadapt_{n}.fastq")
+	params:
+		nfiles=config["split_fastq"]["nfiles"],
+		R1=config["resultsfolder"]+"{run}/splitted_fastq/{run}_R1_cutadapt",
+		R2=config["resultsfolder"]+"{run}/splitted_fastq/{run}_R2_cutadapt"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obidistribute -n {params.nfiles} -p {params.R1}  {input.R1}
+		obidistribute -n {params.nfiles} -p {params.R2} {input.R2}
+		"""
+
+
+# PAIRING
+rule pairing:
+	input:
+		R1=config["resultsfolder"]+"{run}/splitted_fastq/{run}_R1_cutadapt_{n}.fastq",
+		R2=config["resultsfolder"]+"{run}/splitted_fastq/{run}_R2_cutadapt_{n}.fastq"
+	output:
+		config["resultsfolder"]+"{run}/splitted_fastq/{run}_R1R2_cutadapt_{n}.fastq"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		illuminapairedend -r {input.R2} {input.R1} > {output}
+		"""
+
+
+# MERGE PAIRED FILES
+rule merge_paired:
+	input:
+		dynamic(config["resultsfolder"]+"{run}/splitted_fastq/{run}_R1R2_cutadapt_{n}.fastq")
+	output:
+		config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt.fastq"
+	shell:
+		"""
+		cat {input} > {output}
+  		"""
+
+
+# ANNOTATE LIBRARIES
+rule annotlib:
+	input:
+		config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt.fastq"
+	output:
+		temp(config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib.fastq")
+	log:
+		"../log/annotlib_{run}.log"
+	params:
+		lib="\"{run}\""
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiannotate -S library:'{params.lib} if score>=0 else "err"' {input} > {output} 2> {log}
+		"""
+
+
+# SPLIT GOOD/BAD ALIGNMENTS
+rule alifilt:
+	input:
+		config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib.fastq"
+	output:
+		good=config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_good.fastq",
+		bad=config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_bad.fastq"
+	log:
+		"../log/split_ali_{run}.log"
+	params:
+		minscore=config["alifilt"]["minscore"],
+		prefix=config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiannotate -S ali:'"good" if score>{params.minscore} else "bad"' {input} | obisplit -t ali -p {params.prefix} 2> {log}
+		"""
+
+
+# DEMULTIPLEXING
+rule demultiplex:
+	input:
+		config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_good.fastq"
+	output:
+		demultiplexed=config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_good_demultiplexed.fasta",
+		unassigned=config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_good_unassigned.fasta"
+	params:
+		ngs=config["resourcesfolder"]+"{run}_ngsfilter.tab"
+	log:
+		"../log/demultiplex_{run}.log"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiannotate --without-progress-bar --sanger -S 'Avgqphred:-int(math.log10(sum(sequence.quality)/len(sequence))*10)' {input} | ngsfilter --fasta-output -t {params.ngs} -u {output.unassigned} > {output.demultiplexed} 2> {log}
+		"""
+
+# MERGE LIBRARIES
+rule merge_demultiplex:
+	input:
+		expand(config["resultsfolder"]+"{run}/{run}_R1R2_cutadapt_lib_good_demultiplexed.fasta", run=config["fastqfiles"])
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed.fasta"
+	log:
+		"../log/merge_demultiplex.log"
+	shell:
+		"""
+		cat {input} > {output} 2> {log}
+		"""
+
+
+# SPLIT FASTA FILES TO SPEED UP DEREPLICATION
+rule split_fasta:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed.fasta"
+	output:
+		dynamic(config["resultsfolder"]+config["mergedfile"]+"/derepl_tmp/tmp{t}.fasta")
+	params:
+		nfiles=config["split_fasta"]["nfiles"],
+		tmp=config["resultsfolder"]+config["mergedfile"]+"/derepl_tmp/tmp"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiannotate -S start:"hash(str(sequence))%{params.nfiles}" {input} | obisplit -t start -p {params.tmp}
+		"""
+
+
+# DEREPLICATION
+rule derepl:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/derepl_tmp/tmp{t}.fasta"
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/uniq/tmp_uniq{t}.fasta"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiuniq -m sample {input} > {output}
+		"""
+
+# MERGE DEREPLICATED FILES
+rule merge_derepl:
+	input:
+		dynamic(config["resultsfolder"]+config["mergedfile"]+"/uniq/tmp_uniq{t}.fasta")
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl.fasta"
+	log:
+		"../log/merge_derepl.log"
+	shell:
+		"""
+		cat {input} > {output} 2> {log}
+		"""
+
+# BASIC FILTRATION
+rule basicfilt:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl.fasta"
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt.fasta"
+	log:
+		"../log/basicfilt.log"
+	params:
+		minlength=config["basicfilt"]["minlength"],
+		mincount=config["basicfilt"]["mincount"]
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiannotate --length -S 'GC_content:len(str(sequence).replace("a","").replace("t",""))*100/len(sequence)' {input} | obigrep -l {params.minlength} -s '^[acgt]+$' -p 'count>{params.mincount}' > {output} 2> {log}
+		"""
+
+
+# CLUSTERING
+rule clustering:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt.fasta"
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt_cl.fasta"
+	log:
+		"../log/clustering.log"
+	params:
+		minsim=config["clustering"]["minsim"]
+	threads: 8
+	shell:
+		"""
+		set +u; module load bioinfo/sumaclust_v1.0.31; set -u
+		sumaclust -t {params.minsim} -p {threads} {input} > {output}
+		"""
+
+
+# MERGE CLUSTERS
+rule merge_clust:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt_cl.fasta"
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt_cl_agg.fasta"
+	log:
+		"../log/merge_clust.log"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obiselect -c cluster -n 1 --merge sample -M -f count {input} > {output} 2> {log}
+		"""
+
+
+# TAB FORMATTING
+rule tab_format:
+	input:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt_cl_agg.fasta"
+	output:
+		config["resultsfolder"]+config["mergedfile"]+"/"+config["mergedfile"]+"_R1R2_cutadapt_lib_good_demultiplexed_derepl_basicfilt_cl_agg.tab"
+	log:
+		"../log/tab_format.log"
+	shell:
+		"""
+		set +u; module load bioinfo/obitools-v1.2.11; set -u
+		obitab -n NA -d -o {input} > {output} 2> {log}
+		"""
+
+
